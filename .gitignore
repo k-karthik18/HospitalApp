@@ -17,3 +17,7 @@ Thumbs.db
 # IDE-specific files
 .vscode/
 .idea/
+
+node_modules/
+.env
+*.log
