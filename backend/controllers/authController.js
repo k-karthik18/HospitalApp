@@ -4,10 +4,21 @@ const db = require("../config/db"); // Correct path to db.js
 const bcrypt = require("bcrypt");
 const jwt = require('jsonwebtoken');
 
+const sendEmail = require("../services/emailService");
+const { sendOTP } = require('../services/otpService');
+const otpService = require('../services/otpService');
+const { resendOTP } = require('../services/otpService');
+
 const SECRET_KEY = 'karthik18';
 
 // Dummy MRNs for validation
 const validMRNs = ["MRN001", "MRN002", "MRN003"];
+
+//validation of email
+const validateEmail = (email) => {
+  const regex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return regex.test(email);
+};
 
 // Patient signup
 const patientSignup = async (req, res) => {
@@ -18,6 +29,11 @@ const patientSignup = async (req, res) => {
       return res.status(400).json({ message: "All fields are required" });
     }
 
+    // Step 1: Validate Email Format
+    if (!validateEmail(email)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
     if (password !== confirm_password) {
       return res.status(400).json({ message: "Passwords do not match" });
     }
@@ -26,21 +42,30 @@ const patientSignup = async (req, res) => {
       return res.status(400).json({ message: "Password must be at least 6 characters long" });
     }
 
-     // Check for duplicates in the database
-     const duplicateCheckQuery = "SELECT * FROM patients WHERE email = ? OR phone_number = ?";
-     const [duplicates] = await db.query(duplicateCheckQuery, [email, phone_number]);
- 
-     if (duplicates.length > 0) {
-       return res.status(400).json({
-         message: "A user with this email or phone number already exists.",
-       });
-     }
+    // Check for duplicates in the database
+    const duplicateCheckQuery = `
+  SELECT email, phone_number FROM pending_patients WHERE email = ? OR phone_number = ?
+  UNION 
+  SELECT email, phone_number FROM patients WHERE email = ? OR phone_number = ?`;
+
+const [duplicates] = await db.query(duplicateCheckQuery, [email, phone_number, email, phone_number]);
+
+    if (duplicates.length > 0) {
+      return res.status(400).json({
+        message: "A user with this email or phone number already exists.",
+      });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const query = "INSERT INTO patients (full_name, email, phone_number, dob, password) VALUES (?, ?, ?, ?, ?)";
+    // Insert into pending_patients table for email verification
+    const query = "INSERT INTO pending_patients (full_name, email, phone_number, dob, password) VALUES (?, ?, ?, ?, ?)";
     await db.query(query, [full_name, email, phone_number, dob, hashedPassword]);
 
-    res.status(201).json({ message: "Patient signed up successfully" });
+    // Send OTP to the user's email for verification
+    await sendOTP(email);
+
+    res.status(201).json({ message: "Patient signed up successfully. Please verify your email." });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Error signing up patient", error: err.message });
@@ -127,6 +152,63 @@ const doctorSignup = async (req, res) => {
   }
 };
 
+// OTP verification endpoint
+const verifyOTPRequest = async (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) {
+    return res.status(400).json({ message: "Email and OTP are required" });
+  }
+
+  try {
+    const { status, message } = await otpService.verifyOTP(email, otp);
+
+    if (status === "success") {
+      // Once OTP is verified, move user to the patients table
+      const query = "UPDATE pending_patients SET email_verified = 1 WHERE email = ?";
+     await db.query(query, [email]);
+
+      const moveQuery = `
+        INSERT INTO patients (full_name, email, phone_number, dob, password)
+        SELECT full_name, email, phone_number, dob, password
+        FROM pending_patients
+        WHERE email = ?`;
+
+      await db.query(moveQuery, [email]);
+
+      // Delete the user from pending_patients after successful verification
+      const deleteQuery = "DELETE FROM pending_patients WHERE email = ?";
+      await db.query(deleteQuery, [email]);
+
+      res.status(200).json({ message: "OTP verified successfully. You can now login." });
+    } else {
+      res.status(400).json({ message });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error verifying OTP", error: err.message });
+  }
+};
+
+
+
+const resendOTPRequest = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Call resend OTP service
+    await resendOTP(email);
+
+    res.status(200).json({ message: "OTP resent successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error resending OTP", error: err.message });
+  }
+};
+
 // Login function to authenticate the user based on email or phone number
 const login = async (req, res) => {
   try {
@@ -174,5 +256,8 @@ module.exports = {
   patientSignup,
   adminstratorSignup,
   doctorSignup,
+  sendEmail,
+  resendOTPRequest, 
+  verifyOTPRequest,
   login
 };
